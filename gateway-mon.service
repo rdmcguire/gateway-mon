@@ -1,0 +1,12 @@
+[Unit]
+Description=Gateway-Mon VPN Gateway Clobberer
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/gateway-mon -linkName gpd0 -delDefaultGw -del 192.168.0.0/16
+StandardOutput=journal
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
