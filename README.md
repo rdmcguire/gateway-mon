@@ -12,11 +12,6 @@ Uses netlink to get instant updates when routes are added to the system.
 
 ## Using it
 
-**Build it**
-```shell
-go build .
-```
-
 **Configure it**
 Just edit the command in gateway-mon.service. No need to get fancy.
 ```
@@ -33,17 +28,14 @@ Usage of ./gateway-mon:
 		Default Log Level (default "info")
 ```
 
-**Install it**
+**Build it**
 ```shell
-sudo install -vm544 gateway-mon /usr/local/bin/
-sudo install gateway-mon.service /etc/systemd/system/
+make
 ```
 
-**Run it**
+**Install it**
 ```shell
-sudo systemctl daemon-reload
-sudo systemctl enable gateway-mon
-sudo systemctl start gateway-mon
+sudo make install
 ```
 
 **Watch it**
@@ -64,4 +56,9 @@ INFO[0099] Route added to gpd0: {Ifindex: 5 Dst: 172.31.37.0/24 Src: <nil> Gw: 1
 INFO[0099] Route added to gpd0: {Ifindex: 5 Dst: 192.168.0.0/16 Src: <nil> Gw: 172.18.248.3 Flags: [] Table: 254}
 INFO[0099] Found extra route to delete: {Ifindex: 5 Dst: 192.168.0.0/16 Src: <nil> Gw: 172.18.248.3 Flags: [] Table: 254}
 WARN[0099] Deleted route to 192.168.0.0/16 via 172.18.248.3 on gpd0
+```
+
+**Uninstall it**
+```shell
+sudo make uninstall
 ```
