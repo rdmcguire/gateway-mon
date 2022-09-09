@@ -29,7 +29,7 @@ Usage of ./gateway-mon:
 		Name of interface to monitor routes for (default "gpd0")
 	-logLevel string
 		Default Log Level (default "info")
-																				```
+```
 
 **Install it**
 ```shell
