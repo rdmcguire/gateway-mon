@@ -21,8 +21,10 @@ go build .
 Just edit the command in gateway-mon.service. No need to get fancy.
 ```
 Usage of ./gateway-mon:
+	-add value
+		Routed networks to create (can be used more than once)
 	-del value
-		Extra destination net to delete
+		Extra destination net to delete (can be used more than once)
 	-delDefaultGw
 		Delete Default Gateway
 	-linkName string

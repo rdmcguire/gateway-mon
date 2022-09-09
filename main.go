@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/sirupsen/logrus"
@@ -12,15 +13,19 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// List of destination networks to delete
-type netList []string
+// List of networks to be deleted or
+// added to the interface
+type netList struct {
+	items []string
+	nets  []*net.IPNet
+}
 
 var (
 	logLevel     string = "info"
-	matchRoute   *netlink.Route
-	deleteRoutes []*netlink.Route
 	log          *logrus.Logger
-	extraNets    netList // Routed networks to delete (in addition to default)
+	matchRoute   *netlink.Route
+	delNets      netList // Routed networks to delete (in addition to default)
+	addNets      netList // Routes to add to interface if missing (or deleted by a -del)
 	linkName     string  = "gpd0"
 	delDefaultGw bool
 )
@@ -30,7 +35,8 @@ func init() {
 	flag.StringVar(&logLevel, "logLevel", logLevel, "Default Log Level")
 	flag.StringVar(&linkName, "linkName", linkName, "Name of interface to monitor routes for")
 	flag.BoolVar(&delDefaultGw, "delDefaultGw", delDefaultGw, "Delete Default Gateway")
-	flag.Var(&extraNets, "del", "Extra destination net to delete")
+	flag.Var(&delNets, "del", "Extra destination net to delete (can be used more than once)")
+	flag.Var(&addNets, "add", "Routed networks to create (can be used more than once)")
 	flag.Parse()
 
 	// Logging
@@ -41,42 +47,39 @@ func init() {
 	}
 	log.SetLevel(level)
 
-	if len(extraNets) > 0 {
-		log.Info(extraNets.String())
+	if len(delNets.items) > 0 {
+		log.Infof("Deleting Net Routes: %s", delNets.String())
+	}
+	if len(addNets.items) > 0 {
+		log.Infof("Adding Net Routes: %s", addNets.String())
 	}
 
 	if delDefaultGw {
 		log.Info("Deleting default gateways")
 	}
 
-	if len(extraNets) == 0 && !delDefaultGw {
+	if len(delNets.items) == 0 && !delDefaultGw {
 		log.Fatalf("I'm useless, nothing to delete, set one or more -del subnets or -delDefaultGw")
 		os.Exit(1)
 	}
-
-	log.Infof("Receiving Route Updates from Netlink...")
-
 }
 
 // Slice of networks
+// Stringer returns list of parsed CIDRs
 func (l *netList) String() string {
-	str := "Deleting Extra Networks:"
-	for _, n := range *l {
-		str += " " + n
-	}
-	return str
+	return strings.Join(l.items, ", ")
 }
+
+// Addes item to the list and also parses
+// the subnet, returning err if invalid
 func (l *netList) Set(val string) error {
 	_, net, err := net.ParseCIDR(val)
 	if err != nil {
 		return err
 	}
-	// Add value to list
-	*l = append(*l, val)
-	// Create Route
-	deleteRoutes = append(deleteRoutes, &netlink.Route{
-		Dst: net,
-	})
+	// Add value and network
+	l.items = append(l.items, val)
+	l.nets = append(l.nets, net)
 	return nil
 }
 
@@ -92,15 +95,21 @@ func main() {
 		log.Fatalf("Failed to subscribe to netlink route monitor")
 	}
 
+	log.Infof("Receiving Route Updates from Netlink...")
+
 	// Handle signals
 	signal.Notify(killed, os.Interrupt, os.Kill, syscall.SIGTERM, syscall.SIGABRT)
+
+	// First-time run
+	addRoutesIfMissing()
+	delUnwantedRoutes()
 
 	for {
 		select {
 		case update := <-routeUpdates:
 			route := update.Route
-			// If it's a new route, check it
 			if update.Type == unix.RTM_NEWROUTE {
+				// If it's a new route, check it
 				log.Debugf("Route Added: %+v", route)
 
 				// Check interface
@@ -114,8 +123,11 @@ func main() {
 					log.Debugf("Route: %+v", route)
 
 					delIfDefault(&route)    // Delete this route if it's a default route
-					delIfExtraRoute(&route) // Deletet this route if it's unwanted
+					delIfExtraRoute(&route) // Delete this route if it's unwanted
 				}
+			} else if update.Type == unix.RTM_DELROUTE {
+				// If a route was removed, ensure desired routes
+				addRoutesIfMissing()
 			}
 
 		// Handle signal
@@ -127,10 +139,105 @@ func main() {
 
 }
 
+// Scans through the link's routes, deleting any route that
+// is set to delete in -del or -delDefaultGw. Typically only
+// run on startup
+func delUnwantedRoutes() {
+	// Retrieve the link
+	link, err := netlink.LinkByName(linkName)
+	if err != nil {
+		log.Errorf("Can't delete routes, link %s not found yet: %+v", linkName, err)
+		return
+	}
+
+	// Retrieve its routes
+	linkRoutes, err := netlink.RouteList(link, 4)
+	if err != nil || len(linkRoutes) == 0 {
+		log.Errorf("Can't delete routes, no routes found on %s: %+v", linkName, err)
+		return
+	}
+
+	// Delete unwanted routes
+	for _, r := range linkRoutes {
+		delIfExtraRoute(&r)
+		delIfDefault(&r)
+	}
+}
+
+// Scans through the link's routes, and adds in any requested
+// routes that are missing. Chooses the most common next-hop, and aborts
+// if there are no routes or if the link doesn't exist
+func addRoutesIfMissing() {
+	if len(addNets.nets) == 0 {
+		log.Debugf("No routes to add, skipping...")
+		return
+	}
+
+	// Retrieve the link
+	link, err := netlink.LinkByName(linkName)
+	if err != nil {
+		log.Errorf("Can't add routes, link %s not found yet: %+v", linkName, err)
+		return
+	}
+
+	// Retrieve its routes
+	linkRoutes, err := netlink.RouteList(link, 4)
+	if err != nil || len(linkRoutes) == 0 {
+		log.Errorf("Can't add routes, no routes found on %s: %+v", linkName, err)
+		return
+	}
+
+	// Find next-hop
+	nextHop := getLinkNextHop(linkRoutes)
+
+	// Add routes
+	if nextHop != nil {
+		for _, net := range addNets.nets {
+			newRoute := &netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Dst:       net,
+				Gw:        *nextHop,
+			}
+			if err := netlink.RouteAdd(newRoute); err != nil {
+				log.WithFields(logrus.Fields{
+					"link":  linkName,
+					"route": newRoute,
+					"error": err,
+				})
+			} else {
+				log.WithFields(logrus.Fields{
+					"link": linkName,
+					"to":   newRoute.Dst.String(),
+					"via":  nextHop.String(),
+				}).Infof("Added route to link")
+			}
+		}
+	}
+}
+
+// Given a list of routes, returns the most commonly used Gw address
+func getLinkNextHop(routes []netlink.Route) *net.IP {
+	var nextHop *net.IP
+	// Record gateway occurrences
+	gateways := make(map[*net.IP]int)
+	for _, r := range routes {
+		gateways[&r.Gw] += 1
+	}
+	// Return most common
+	var max int
+	for gw, i := range gateways {
+		if i > max {
+			nextHop = gw
+		}
+	}
+	log.Debugf("Found most common gateway (%s) in %d routes", nextHop.String(), len(routes))
+	return nextHop
+}
+
 // If this route is listed in our extraNets slice, delete it
 func delIfExtraRoute(r *netlink.Route) {
-	for _, route := range deleteRoutes {
-		if r.Dst != nil && r.Dst.IP.Equal(route.Dst.IP) {
+	for _, route := range delNets.nets {
+		if r.Dst != nil && r.Dst.IP.Equal(route.IP) {
 			log.Infof("Found extra route to delete: %+v", r)
 			delRoute(r)
 		}
