@@ -259,14 +259,21 @@ func delIfDefault(r *netlink.Route) {
 // Checks if route is default
 func isDefault(r *netlink.Route) bool {
 	var isDefault bool
-	if r.Src == nil && r.Dst == nil && r.Gw.IsPrivate() {
+	if r.Src == nil && r.Dst == nil && (r.Gw.IsPrivate() || r.Gw == nil) {
 		isDefault = true
+	} else {
+		log.Debugf("%+v is not default route", r)
 	}
 	return isDefault
 }
 
 // Deletes a route
 func delRoute(r *netlink.Route) {
+	// Can't delete a route with no dest net, so explicitly set to all if nil
+	if isDefault(r) && r.Dst == nil {
+		_, defaultDest, _ := net.ParseCIDR("0.0.0.0/0")
+		r.Dst = defaultDest
+	}
 	err := netlink.RouteDel(r)
 	if err != nil {
 		log.Errorf("Failed to delete route on %s: %+v", linkName, err)
